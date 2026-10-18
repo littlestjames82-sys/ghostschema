@@ -19,6 +19,10 @@ DEF_SECTIONS = ("$defs", "definitions")
 # ---------------------------------------------------------------- OpenAPI
 
 def list_operations(doc):
+    """List every operation in an OpenAPI document's ``paths`` and
+    ``webhooks``. Each entry carries its section kind, path, method,
+    node, operationId (or a ``METHOD /path`` fallback), and a display
+    label such as ``GET /pets/{petId} (getPet)``."""
     ops = []
     for kind in ("paths", "webhooks"):
         section = doc.get(kind)
@@ -40,6 +44,8 @@ def list_operations(doc):
 
 
 def component_entries(doc):
+    """Return ``{section: {name: node}}`` for an OpenAPI document's
+    ``components``, keeping only sections whose value is an object."""
     comps = doc.get("components")
     out = {}
     if isinstance(comps, dict):
@@ -60,7 +66,9 @@ def _op_haystacks(doc, op):
     ref_names = []
     for _parts, ref in iter_refs(op["node"]):
         if ref.startswith("#/"):
-            ref_names.append(pointer_parts(ref)[-1])
+            parts = pointer_parts(ref)
+            if parts:  # "#/" has no segments; there is no name to add
+                ref_names.append(parts[-1])
     return [
         (3, op["op_id"]),
         (3, op["path"]),
@@ -138,6 +146,16 @@ def _resolve_select_openapi(doc, ops, comps, select_ids):
 
 
 def slice_openapi(doc, task=None, select_ids=None, keep_all=False):
+    """Reduce an OpenAPI 3.x document to the selected operations and
+    everything reachable from them by local $refs.
+
+    Selection is ``keep_all``, else ``select_ids``, else ``task``
+    wording. Returns a result dict with the reduced document, kept
+    and dropped lists, unresolved (remote or broken) refs, warnings,
+    and the selection echo. Raises SchemaError for an unknown select
+    id, an empty task, no selection, or a selection matching nothing.
+    The reduced document is closure-checked before it is returned.
+    """
     ops = list_operations(doc)
     comps = component_entries(doc)
     op_keys = set()
@@ -327,6 +345,18 @@ def _reduce_openapi(doc, op_keys, keep_pointers, seed_pointers):
 # ------------------------------------------------------------ JSON Schema
 
 def slice_jsonschema(doc, task=None, select_ids=None, keep_all=False):
+    """Reduce a standalone JSON Schema to the selected definitions
+    and everything reachable from them by local $refs.
+
+    ``select_ids`` may name definitions, use ``#/$defs/<name>``
+    pointers, or select the root with ``root`` (also ``#`` /
+    ``$root``). When the root is not selected and exactly one
+    selected definition is kept, the reduced root is a ``$ref`` to
+    it; with several kept, it is an ``anyOf`` of ``$ref`` entries.
+    Returns the
+    same result shape as :func:`slice_openapi` and raises
+    SchemaError on the same failure classes.
+    """
     defs = {}
     for section in DEF_SECTIONS:
         entries = doc.get(section)
@@ -469,8 +499,8 @@ def _verify_closure(original, reduced, unresolved, result):
             hard.append(failure)
     if missing_local_refs:
         result["warnings"].append(
-            "source contains local $refs that do not resolve in the "
-            "source itself: " + ", ".join(sorted(missing_local_refs))
+            "source contains local references that do not resolve in "
+            "the source itself: " + ", ".join(sorted(missing_local_refs))
             + " (carried through, not fixable by slicing)"
         )
     if hard:

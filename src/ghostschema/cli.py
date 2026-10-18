@@ -19,6 +19,12 @@ from .loader import SchemaError, load_spec
 
 
 def _parse_select(raw):
+    """Normalise a ``--select`` value to a list of id strings.
+
+    Accepts ``None`` (no selection), a comma-separated string from
+    the CLI, or a list/tuple from the MCP server. Empty pieces are
+    dropped. Returns ``None`` when no selection was given.
+    """
     if not raw:
         return None
     if isinstance(raw, (list, tuple)):
@@ -27,13 +33,38 @@ def _parse_select(raw):
 
 
 def run_slice(spec_path, task=None, select=None, keep_all=False, outdir=None):
-    """Core entry shared by the CLI and the MCP server. Returns the
-    manifest dict. Raises SchemaError on any refusal/failure."""
+    """Slice one spec and write its bundle. Core entry shared by the
+    CLI and the MCP server.
+
+    Exactly one selection mode applies, in this order: ``keep_all``
+    (``--all``), then ``select`` (``--select`` ids), then ``task``
+    (``--task`` wording). JSON specs produce a reduced ``spec.json``;
+    GraphQL SDL produces an outline bundle instead. Returns the
+    manifest dict. Raises SchemaError on any refusal or failure
+    (unsupported or YAML format, unknown select id, selection that
+    matched nothing, closure check failure).
+    """
     loaded = load_spec(spec_path)
     select_ids = _parse_select(select)
     out = Path(outdir) if outdir else Path.cwd() / "schema-slice"
     if out.resolve() == loaded.path.resolve():
         raise SchemaError("output directory must not be the spec file itself")
+    # The input is never modified: refuse if any file the bundle would
+    # write lands on the spec itself (an output directory equal to the
+    # spec's own directory plus a spec named like a bundle artifact, or
+    # a bundle filename symlinked onto the spec).
+    artifact_names = (
+        ("outline.json", "OUTLINE.md", "manifest.json", "SCHEMA.md")
+        if loaded.format == "graphql-sdl"
+        else ("spec.json", "manifest.json", "SCHEMA.md")
+    )
+    for name in artifact_names:
+        if (out / name).resolve() == loaded.path.resolve():
+            raise SchemaError(
+                f"output directory {out} would overwrite the input spec "
+                f"({loaded.path}) with bundle file {name}; "
+                "choose a different output directory"
+            )
     if loaded.format == "graphql-sdl":
         result = outline_sdl(loaded.text, task=task, select_ids=select_ids,
                              keep_all=keep_all)
@@ -57,7 +88,7 @@ def run_slice(spec_path, task=None, select=None, keep_all=False, outdir=None):
         external = [u for u in result["unresolved"] if not u.get("missing_local")]
         if external:
             manifest["warnings"] = list(manifest["warnings"]) + [
-                f"{len(external)} remote $ref(s) were not fetched "
+                f"{len(external)} remote reference(s) were not fetched "
                 "(static parsing only) and are listed under unresolved_refs"
             ]
             result["warnings"] = manifest["warnings"]
@@ -66,6 +97,14 @@ def run_slice(spec_path, task=None, select=None, keep_all=False, outdir=None):
 
 
 def inspect_data(spec_path):
+    """Return a summary dict describing one spec, without slicing it.
+
+    Always includes the detected format, source file name, sha256,
+    and byte size. OpenAPI summaries list operations and component
+    names; JSON Schema summaries list the title, root properties,
+    and definition names; SDL summaries list types and note that
+    treatment is outline-only. Raises SchemaError on any refusal.
+    """
     loaded = load_spec(spec_path)
     data = {"format": loaded.format, "source": loaded.path.name,
             "sha256": loaded.sha256, "bytes": loaded.size_bytes}
@@ -104,6 +143,7 @@ def inspect_data(spec_path):
 
 
 def _print_inspect(data):
+    """Print an :func:`inspect_data` summary in plain text."""
     print(f"format: {data['format']}")
     if data["format"] == "openapi":
         print(f"operations: {len(data['operations'])}")
@@ -131,6 +171,7 @@ def _print_inspect(data):
 
 
 def _print_summary(manifest, outdir):
+    """Print the short stdout summary shown after a successful slice."""
     print(f"GhostSchema: {manifest['source']['name']} ({manifest['format']}, "
           f"treatment: {manifest['treatment']})")
     print(f"Tokens (estimated): {manifest['original_tokens']} -> "
@@ -151,29 +192,64 @@ def _print_summary(manifest, outdir):
 
 
 def main(argv=None):
+    """Command-line entry point. Returns 0 on success, 2 on failure."""
     parser = argparse.ArgumentParser(
         prog="ghostschema",
-        description="Slice large API specifications down to what a task touches.")
+        description="Slice large API specifications down to what a task "
+                    "touches. OpenAPI 3.x JSON and standalone JSON Schema "
+                    "are reduced by $ref reachability; GraphQL SDL is "
+                    "outlined only. Remote $refs are never fetched. "
+                    "YAML and Swagger / OpenAPI 2.0 specs are refused.",
+        epilog="Exit codes: 0 = success, 2 = the spec could not be "
+               "processed (the reason is printed to stderr). "
+               "Run 'ghostschema <command> --help' for command help.")
     parser.add_argument("--version", action="version",
                         version=f"ghostschema {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_slice = sub.add_parser("slice", help="slice a spec into a bundle directory")
-    p_slice.add_argument("spec")
-    p_slice.add_argument("--task", help="task description; selection by term matching")
+    p_slice = sub.add_parser(
+        "slice", help="slice a spec into a bundle directory",
+        description="Slice a spec into a bundle directory containing "
+                    "the reduced spec (or SDL outline), manifest.json, "
+                    "and SCHEMA.md. The input file is never modified. "
+                    "Give one selection: --select, --task, or --all.",
+        epilog="Examples:\n"
+               "  ghostschema slice api.json --select getPet -o bundle/\n"
+               "  ghostschema slice api.json --task \"add a pet\" -o bundle/\n"
+               "  ghostschema slice api.json --all -o bundle/\n"
+               "  ghostschema slice schema.graphql --select Pet -o bundle/",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_slice.add_argument("spec", help="path to the spec file (OpenAPI 3.x "
+                                      "JSON, JSON Schema JSON, or GraphQL SDL)")
+    p_slice.add_argument("--task", help="task description in plain words; "
+                                        "operations and schemas are selected "
+                                        "by word matching (see README Limits)")
     p_slice.add_argument("--select", help="comma-separated ids: operationIds, "
-                                          "'METHOD /path', schema names, #/ pointers, "
-                                          "SDL type names, or 'root' for JSON Schema")
+                                          "'METHOD /path', bare paths, schema "
+                                          "names, #/ pointers, SDL type names, "
+                                          "or 'root' for JSON Schema; unknown "
+                                          "ids fail by name")
     p_slice.add_argument("--all", action="store_true",
-                         help="keep the full document (baseline / escape hatch)")
+                         help="keep the full document (baseline for token "
+                              "comparison / escape hatch)")
     p_slice.add_argument("-o", "--out", default=None,
                          help="output bundle directory (default: ./schema-slice)")
 
-    p_inspect = sub.add_parser("inspect", help="list operations/schemas/types in a spec")
-    p_inspect.add_argument("spec")
-    p_inspect.add_argument("--json", action="store_true", help="machine-readable output")
+    p_inspect = sub.add_parser(
+        "inspect", help="list operations/schemas/types in a spec",
+        description="List what a spec contains without slicing it: "
+                    "its format, operations, schemas, definitions, or "
+                    "SDL types, depending on the format detected.")
+    p_inspect.add_argument("spec", help="path to the spec file")
+    p_inspect.add_argument("--json", action="store_true",
+                           help="print the listing as JSON instead of plain text")
 
-    sub.add_parser("mcp", help="run the stdio MCP server")
+    sub.add_parser(
+        "mcp", help="run the stdio MCP server",
+        description="Run the stdio MCP server (JSON-RPC over stdin and "
+                    "stdout) serving the schema_inspect and schema_slice "
+                    "tools. Payloads are summaries only, with no spec "
+                    "bodies. Local only; no network access.")
 
     args = parser.parse_args(argv)
     try:
@@ -195,6 +271,10 @@ def main(argv=None):
             return serve()
     except SchemaError as exc:
         print(f"ghostschema: {exc}", file=sys.stderr)
+        return 2
+    except RecursionError:
+        print("ghostschema: spec is nested too deeply to process "
+              "statically", file=sys.stderr)
         return 2
     return 2
 

@@ -13,6 +13,8 @@ MAX_LIST = 200
 
 
 def _cap(items):
+    """Cap a list at MAX_LIST entries, appending a ``... (N more)``
+    marker when it was longer, so payloads stay summaries."""
     items = list(items)
     if len(items) > MAX_LIST:
         return items[:MAX_LIST] + [f"... ({len(items) - MAX_LIST} more)"]
@@ -53,26 +55,37 @@ TOOLS = {
     "schema_slice": {
         "description": "Slice a spec (OpenAPI 3.x JSON / JSON Schema / "
                        "GraphQL SDL outline) into an output bundle and "
-                       "return the manifest summary (no spec bodies).",
+                       "return the manifest summary (no spec bodies). "
+                       "Give one selection: select, task, or all. "
+                       "Remote $refs are never fetched; YAML is refused.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "spec": {"type": "string"},
-                "out": {"type": "string"},
-                "task": {"type": "string"},
-                "select": {"type": "array", "items": {"type": "string"}},
-                "all": {"type": "boolean"},
+                "spec": {"type": "string",
+                         "description": "path to the spec file"},
+                "out": {"type": "string",
+                        "description": "output bundle directory"},
+                "task": {"type": "string",
+                         "description": "task wording for word-matching selection"},
+                "select": {"type": "array", "items": {"type": "string"},
+                           "description": "explicit ids to select (operationIds, "
+                                          "schema names, #/ pointers, or SDL type names)"},
+                "all": {"type": "boolean",
+                        "description": "keep the full document"},
             },
             "required": ["spec", "out"],
         },
         "run": _tool_slice,
     },
     "schema_inspect": {
-        "description": "List operations/schemas (JSON specs) or types "
-                       "(GraphQL SDL) in a spec file.",
+        "description": "List operations and component schemas (OpenAPI), "
+                       "definitions (JSON Schema), or types (GraphQL SDL) "
+                       "in a spec file, with its format, hash, and size. "
+                       "Returns a summary only, never spec bodies.",
         "inputSchema": {
             "type": "object",
-            "properties": {"spec": {"type": "string"}},
+            "properties": {"spec": {"type": "string",
+                                    "description": "path to the spec file"}},
             "required": ["spec"],
         },
         "run": _tool_inspect,
@@ -81,7 +94,16 @@ TOOLS = {
 
 
 def handle(request):
+    """Handle one JSON-RPC request dict. Returns the response dict,
+    or ``None`` for notifications (which get no response). Supports
+    ``initialize``, ``tools/list``, and ``tools/call``; unknown
+    methods and tools return JSON-RPC error objects."""
+    if not isinstance(request, dict):
+        return {"jsonrpc": "2.0", "id": None, "error": {
+            "code": -32600, "message": "invalid request: not a JSON object"}}
     method = request.get("method", "")
+    if not isinstance(method, str):
+        method = ""
     rid = request.get("id")
     if method == "initialize":
         return {"jsonrpc": "2.0", "id": rid, "result": {
@@ -96,13 +118,18 @@ def handle(request):
                       for name, t in TOOLS.items()],
         }}
     if method == "tools/call":
-        params = request.get("params", {})
+        params = request.get("params")
+        if not isinstance(params, dict):
+            params = {}
         tool = TOOLS.get(params.get("name", ""))
         if tool is None:
             return {"jsonrpc": "2.0", "id": rid, "error": {
                 "code": -32602, "message": f"unknown tool {params.get('name')!r}"}}
+        arguments = params.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {}
         try:
-            result = tool["run"](params.get("arguments", {}))
+            result = tool["run"](arguments)
             return {"jsonrpc": "2.0", "id": rid, "result": {
                 "content": [{"type": "text",
                              "text": json.dumps(result, indent=2)}],
@@ -117,6 +144,8 @@ def handle(request):
 
 
 def serve(stdin=None, stdout=None):
+    """Serve JSON-RPC requests, one JSON object per line, until EOF.
+    Blank lines and unparseable lines are skipped. Returns 0."""
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
     for line in stdin:

@@ -14,6 +14,14 @@ from .tokens import METHOD, estimate_tokens
 
 
 def build_manifest(loaded, treatment, result, sliced_text):
+    """Build the manifest dict for one run.
+
+    ``treatment`` is ``"reduced"`` for JSON specs or ``"outline"``
+    for SDL. ``result`` is the slicer or outliner result (selection,
+    kept, dropped, unresolved, warnings). Token figures are estimates
+    for the untouched source text and for ``sliced_text``, stamped
+    with the estimator method that produced them.
+    """
     original_tokens = estimate_tokens(loaded.text)
     sliced_tokens = estimate_tokens(sliced_text)
     return {
@@ -41,6 +49,7 @@ def build_manifest(loaded, treatment, result, sliced_text):
 
 
 def render_schema_md(manifest):
+    """Render a manifest as the human-readable ``SCHEMA.md`` summary."""
     src = manifest["source"]
     lines = [
         f"# GhostSchema bundle: {src['name']}",
@@ -82,7 +91,8 @@ def render_schema_md(manifest):
         lines.append("## Unresolved references (remote, never fetched)")
         for item in manifest["unresolved_refs"]:
             extra = " [also missing locally]" if item.get("missing_local") else ""
-            lines.append(f"- {item['ref']} (referenced from {item['from']}){extra}")
+            via = f" via {item['via']}" if item.get("via") else ""
+            lines.append(f"- {item['ref']} (referenced from {item['from']}{via}){extra}")
         lines.append("")
     if manifest["warnings"]:
         lines.append("## Warnings")
@@ -97,13 +107,23 @@ def render_schema_md(manifest):
 
 
 def write_bundle(outdir, files, manifest):
+    """Write a bundle directory: ``files`` plus manifest.json and SCHEMA.md.
+
+    Creates the directory if needed. Writes only inside ``outdir``;
+    raises SchemaError if ``outdir`` exists and is not a directory.
+    Returns the output path.
+    """
     out = Path(outdir)
     if out.exists() and not out.is_dir():
         raise SchemaError(f"output path exists and is not a directory: {out}")
-    out.mkdir(parents=True, exist_ok=True)
-    for name, text in files.items():
-        (out / name).write_text(text, encoding="utf-8")
-    (out / "manifest.json").write_text(
-        json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    (out / "SCHEMA.md").write_text(render_schema_md(manifest), encoding="utf-8")
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        for name, text in files.items():
+            (out / name).write_text(text, encoding="utf-8")
+        (out / "manifest.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        (out / "SCHEMA.md").write_text(
+            render_schema_md(manifest), encoding="utf-8")
+    except OSError as exc:
+        raise SchemaError(f"cannot write bundle to {out}: {exc}")
     return out

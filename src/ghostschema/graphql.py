@@ -17,7 +17,7 @@ OUTLINE_LABEL = "GraphQL SDL outline - not a complete reduced schema"
 BUILTIN_SCALARS = {"String", "Int", "Float", "Boolean", "ID"}
 
 _DEF_START = re.compile(
-    r"(?m)^[ \t]*(extend[ \t]+)?(type|interface|input|enum|union|scalar|schema|directive)[ \t]+"
+    r"(?m)(?:^|\})[ \t]*(extend[ \t]+)?(type|interface|input|enum|union|scalar|schema|directive)[ \t]+"
 )
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FIELD_TYPE = re.compile(r"(?:\[|[A-Za-z_])[\[\]\w!]*")
@@ -26,7 +26,11 @@ _TYPE_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 def _strip_sdl(text: str) -> str:
     text = re.sub(r'"""(?:\\.|[^\\])*?"""', " ", text, flags=re.S)
-    text = re.sub(r'"(?:\\.|[^"\\])*"', " ", text)
+    # Single-line strings cannot contain a raw newline in GraphQL, so
+    # the pattern must not cross one either: a stray quote in a comment
+    # would otherwise swallow every definition up to the next quote,
+    # possibly lines later.
+    text = re.sub(r'"(?:\\.|[^"\\\n])*"', " ", text)
     text = re.sub(r"#[^\n]*", "", text)
     return text
 
@@ -283,6 +287,17 @@ def _follow_names(entry):
 
 
 def outline_sdl(text, task=None, select_ids=None, keep_all=False):
+    """Build the labelled outline for a GraphQL SDL document.
+
+    Selection is ``keep_all``, else ``select_ids`` (exact type names
+    only), else ``task`` wording. Reachability follows type names
+    through field and argument types, implemented interfaces, and
+    union members. Returns a result dict whose ``outline`` is the
+    outline document, plus kept and dropped type names, warnings,
+    and the selection echo. Never returns a reduced schema. Raises
+    SchemaError when no types parse, an id is unknown, or the
+    selection matches nothing.
+    """
     types, directives = parse_sdl(text)
     by_name = {t["name"]: t for t in types}
     if not types:
@@ -336,7 +351,11 @@ def outline_sdl(text, task=None, select_ids=None, keep_all=False):
                 queue.append(nxt)
     schema_entry = by_name.get("schema")
     if schema_entry is not None:
-        roots = {f["type"] for f in schema_entry["fields"]}
+        # Root operation types may be wrapped (Query!, [Query]): compare
+        # by bare type name, not by the raw type string.
+        roots = set()
+        for f in schema_entry["fields"]:
+            roots.update(_TYPE_TOKEN.findall(f["type"]))
         if roots & kept:
             kept.add("schema")
     kept_types = [by_name[n] for n in (t["name"] for t in types) if n in kept]
@@ -369,6 +388,7 @@ def outline_sdl(text, task=None, select_ids=None, keep_all=False):
 
 
 def render_outline_md(outline, source_name):
+    """Render an outline dict as the human-readable ``OUTLINE.md``."""
     lines = [
         f"# GhostSchema outline: {source_name}",
         "",

@@ -45,11 +45,16 @@ if _gs_estimate is not None:
     METHOD = f"ghostslice estimator ({_gs_method}); estimates only"
 
     def estimate_tokens(text: str) -> int:
+        """Estimate tokens in ``text`` with GhostSlice's estimator.
+        The result is an estimate, not an exact tokenizer count."""
         return int(_gs_estimate(text))
 else:
     METHOD = "ghostschema-estimate-v1: ceil(len(text)/4), estimates only"
 
     def estimate_tokens(text: str) -> int:
+        """Estimate tokens in ``text`` as ``ceil(len(text) / 4)``.
+        Fallback used when no GhostSlice estimator is reachable;
+        the result is an estimate only."""
         if not text:
             return 0
         return int(math.ceil(len(text) / 4))

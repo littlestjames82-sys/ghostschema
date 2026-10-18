@@ -7,6 +7,11 @@ Slices large API specifications down to what a task touches:
 
 Static parsing only. Remote $refs are never fetched. YAML is refused.
 Input files are never modified. Python stdlib only.
+
+Command line: ``ghostschema inspect <spec>`` lists what a spec
+contains; ``ghostschema slice <spec> --select <ids>`` (or ``--task``
+or ``--all``) writes a bundle; ``ghostschema mcp`` runs the stdio
+MCP server. See README.md for the full guide.
 """
 
 __version__ = "0.1.0"

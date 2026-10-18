@@ -37,6 +37,10 @@ def ident_tokens(text) -> set:
 
 
 def task_terms(task: str):
+    """Split task wording into match terms: lowercased alphanumeric
+    tokens of length 2 or more, with stopwords removed, in first-seen
+    order and de-duplicated. An empty result means the task wording
+    carried no usable terms."""
     terms = []
     for tok in re.findall(r"[a-z0-9]+", (task or "").lower()):
         if len(tok) >= 2 and tok not in STOPWORDS and tok not in terms:
